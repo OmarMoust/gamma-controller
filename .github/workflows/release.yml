@@ -1,0 +1,83 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version number (e.g., 1.0.0)'
+        required: true
+        default: '1.0.0'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Extract version from tag
+        id: version
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $version = "${{ github.event.inputs.version }}"
+          } else {
+            $version = "${{ github.ref_name }}" -replace '^v', ''
+          }
+          echo "VERSION=$version" >> $env:GITHUB_OUTPUT
+          echo "Version: $version"
+
+      - name: Update version in Inno Setup script
+        shell: pwsh
+        run: |
+          $issPath = "installer/GammaController.iss"
+          $content = Get-Content $issPath -Raw
+          $content = $content -replace '#define MyAppVersion ".*"', '#define MyAppVersion "${{ steps.version.outputs.VERSION }}"'
+          Set-Content $issPath $content
+          echo "Updated version in Inno Setup script to ${{ steps.version.outputs.VERSION }}"
+
+      - name: Restore dependencies
+        run: dotnet restore GammaController
+
+      - name: Build application
+        run: dotnet build GammaController -c Release --no-restore
+
+      - name: Publish self-contained executable
+        run: dotnet publish GammaController -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -o publish
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          echo "C:\Program Files (x86)\Inno Setup 6" >> $env:GITHUB_PATH
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer/GammaController.iss
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GammaController-Setup-${{ steps.version.outputs.VERSION }}
+          path: dist/GammaController-Setup-${{ steps.version.outputs.VERSION }}.exe
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/GammaController-Setup-${{ steps.version.outputs.VERSION }}.exe
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
